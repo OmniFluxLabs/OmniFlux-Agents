@@ -137,7 +137,7 @@ def main(): print("Multi-Agent AI System - Example Usage\n" + "=" * 60 + "\n" + 
     print_response("13. Get Researcher Agent Status", response)
     
     # 14. Get task status
-    response = requests.get(f"{BASE_URL}/tasks/research_001")
+    response = requests.get(f"{BASE_URL}/tasks/research_001", timeout=10)
     print_response("14. Get Task Status", response)
     
     print("\n" + "=" * 60)
