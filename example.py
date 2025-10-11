@@ -24,132 +24,149 @@ def print_response(title, response):
     print(json.dumps(response.json(), indent=2))
 
 
-def main():
-    """Demonstrate the multi-agent system."""
+def execute_agent_task(agent_name, task, task_id, step_num, description):
+    """Execute a task on a specific agent."""
+    response = requests.post(
+        f"{BASE_URL}/agents/{agent_name}/execute",
+        json={"task": task, "task_id": task_id},
+        timeout=DEFAULT_TIMEOUT
+    )
+    print_response(f"{step_num}. {description}", response)
+    return response
 
+
+def get_system_info():
+    """Perform initial system checks."""
     print("Multi-Agent AI System - Example Usage")
     print("=" * 60)
-
-    # 1. Health check
+    
+    # Health check
     response = requests.get(f"{BASE_URL}/", timeout=5)
     print_response("1. Health Check", response)
-
-    # 2. List all agents
+    
+    # List all agents
     response = requests.get(f"{BASE_URL}/agents", timeout=10)
     print_response("2. List All Agents", response)
 
-    # 3. Research task
-    response = requests.post(
-        f"{BASE_URL}/agents/researcher/execute",
-        json={
-            "task": "Research best practices for microservices architecture",
-            "task_id": "research_001"
-        },
-        timeout=DEFAULT_TIMEOUT
-    )
-    print_response("3. Researcher Agent - Execute Research", response)
 
-    # 4. Get shared context (research results)
+def run_research_workflow():
+    """Execute research and coding workflow."""
+    # Research task
+    execute_agent_task(
+        "researcher",
+        "Research best practices for microservices architecture",
+        "research_001",
+        3,
+        "Researcher Agent - Execute Research"
+    )
+    
+    # Get research context
     time.sleep(0.5)
     response = requests.get(f"{BASE_URL}/context/latest_research", timeout=5)
     print_response("4. Get Research Context", response)
-
-    # 5. Coding task (will use research context)
-    response = requests.post(
-        f"{BASE_URL}/agents/coder/execute",
-        json={
-            "task": "Create a microservice skeleton in Python",
-            "task_id": "code_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+    
+    # Coding task
+    execute_agent_task(
+        "coder",
+        "Create a microservice skeleton in Python",
+        "code_001",
+        5,
+        "Coder Agent - Generate Code"
     )
-    print_response("5. Coder Agent - Generate Code", response)
 
-    # 6. Planning task
-    response = requests.post(
-        f"{BASE_URL}/agents/planner/execute",
-        json={
-            "task": "Plan microservice deployment",
-            "task_id": "plan_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+
+def run_planning_workflow():
+    """Execute planning and validation workflow."""
+    # Planning task
+    execute_agent_task(
+        "planner",
+        "Plan microservice deployment",
+        "plan_001",
+        6,
+        "Planner Agent - Create Project Plan"
     )
-    print_response("6. Planner Agent - Create Project Plan", response)
-
-    # 7. Validation task (will use code context)
-    response = requests.post(
-        f"{BASE_URL}/agents/validator/execute",
-        json={
-            "task": "Validate generated code",
-            "task_id": "validate_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+    
+    # Validation task
+    execute_agent_task(
+        "validator",
+        "Validate generated code",
+        "validate_001",
+        7,
+        "Validator Agent - Test Code"
     )
-    print_response("7. Validator Agent - Test Code", response)
 
-    # 8. Design task
-    response = requests.post(
-        f"{BASE_URL}/agents/designer/execute",
-        json={
-            "task": "Design microservice dashboard UI",
-            "task_id": "design_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+
+def run_design_and_analysis():
+    """Execute design and analysis tasks."""
+    # Design task
+    execute_agent_task(
+        "designer",
+        "Design microservice dashboard UI",
+        "design_001",
+        8,
+        "Designer Agent - Create UI/UX"
     )
-    print_response("8. Designer Agent - Create UI/UX", response)
-
-    # 9. Analytics task
-    response = requests.post(
-        f"{BASE_URL}/agents/analyst/execute",
-        json={
-            "task": "Analyze system performance metrics",
-            "task_id": "analyze_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+    
+    # Analytics task
+    execute_agent_task(
+        "analyst",
+        "Analyze system performance metrics",
+        "analyze_001",
+        9,
+        "Analyst Agent - Process Metrics"
     )
-    print_response("9. Analyst Agent - Process Metrics", response)
-
-    # 10. Security audit
-    response = requests.post(
-        f"{BASE_URL}/agents/security/execute",
-        json={
-            "task": "Audit microservice security",
-            "task_id": "security_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+    
+    # Security audit
+    execute_agent_task(
+        "security",
+        "Audit microservice security",
+        "security_001",
+        10,
+        "Security Agent - Security Audit"
     )
-    print_response("10. Security Agent - Security Audit", response)
 
-    # 11. Deployment task (will use validation context)
-    response = requests.post(
-        f"{BASE_URL}/agents/deployer/execute",
-        json={
-            "task": "production",
-            "task_id": "deploy_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+
+def run_deployment_workflow():
+    """Execute deployment and monitoring tasks."""
+    # Deployment task
+    execute_agent_task(
+        "deployer",
+        "production",
+        "deploy_001",
+        11,
+        "Deployer Agent - Manage CI/CD"
     )
-    print_response("11. Deployer Agent - Manage CI/CD", response)
-
-    # 12. Monitoring task (will use deployment context)
-    response = requests.post(
-        f"{BASE_URL}/agents/monitor/execute",
-        json={
-            "task": "all",
-            "task_id": "monitor_001"
-        },
-        timeout=DEFAULT_TIMEOUT
+    
+    # Monitoring task
+    execute_agent_task(
+        "monitor",
+        "all",
+        "monitor_001",
+        12,
+        "Monitor Agent - Track Performance"
     )
-    print_response("12. Monitor Agent - Track Performance", response)
 
-    # 13. Get agent status
+
+def check_status():
+    """Check agent and task status."""
+    # Get agent status
     response = requests.get(f"{BASE_URL}/agents/researcher/status", timeout=5)
     print_response("13. Get Researcher Agent Status", response)
-
-    # 14. Get task status
+    
+    # Get task status
     response = requests.get(f"{BASE_URL}/tasks/research_001", timeout=10)
     print_response("14. Get Task Status", response)
 
+
+def main():
+    """Demonstrate the multi-agent system."""
+    get_system_info()
+    run_research_workflow()
+    run_planning_workflow()
+    run_design_and_analysis()
+    run_deployment_workflow()
+    check_status()
+    
     print("\n" + "=" * 60)
     print("Example completed successfully!")
     print("=" * 60)

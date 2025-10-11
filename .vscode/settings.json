@@ -1,6 +1,3 @@
-{
-    "chat.mcp.serverSampling": {
-            bvc
-        mcp
-    }
+﻿{
+    "chat.mcp.serverSampling": "mcp"
 }
