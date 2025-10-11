@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch
+from unittest.mock import Mock  # Removed 'patch' since it is unused
 from main import app
 from memory import RedisMemory
 from agents import ResearcherAgent, CoderAgent
