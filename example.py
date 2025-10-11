@@ -34,7 +34,7 @@ def main():
     print_response("1. Health Check", response)
     
     # 2. List all agents
-    response = requests.get(f"{BASE_URL}/agents")
+    response = requests.get(f"{BASE_URL}/agents", timeout=10)
     print_response("2. List All Agents", response)
     
     # 3. Research task
