@@ -133,7 +133,7 @@ def main():
     print_response("12. Monitor Agent - Track Performance", response)
     
     # 13. Get agent status
-    response = requests.get(f"{BASE_URL}/agents/researcher/status")
+    response = requests.get(f"{BASE_URL}/agents/researcher/status", timeout=5)
     print_response("13. Get Researcher Agent Status", response)
     
     # 14. Get task status
