@@ -49,7 +49,7 @@ def main():
     
     # 4. Get shared context (research results)
     time.sleep(0.5)
-    response = requests.get(f"{BASE_URL}/context/latest_research")
+    response = requests.get(f"{BASE_URL}/context/latest_research", timeout=5)
     print_response("4. Get Research Context", response)
     
     # 5. Coding task (will use research context)
