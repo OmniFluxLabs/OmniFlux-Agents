@@ -1,0 +1,17 @@
+{
+    "extensions": {
+        "recommendations": [
+            "codacy-app.codacy"
+        ]
+    },
+    "settings": {
+        "codacy.cli.cliVersion": "https://github.com/codacy/codacy-cli-v2/releases/tag/1.0.0-main.358.sha.7cb05d0",
+        "codacy.cli.devMode": true
+    },
+    "folders": [
+        {
+            "name": "OmniFlux-Agents",
+            "path": "../../OmniFlux-Agents"
+        }
+    ]
+}

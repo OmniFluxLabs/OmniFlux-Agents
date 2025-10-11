@@ -1,0 +1,1171 @@
+"""
+FastAPI Web Interface for StayUpAgents
+Provides a modern web UI for managing and monitoring AI agents
+"""
+
+import asyncio
+import json
+import os
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+# Import our agents system
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from stayup_agents_main import (
+    MultiAgentSystem, AgentRole, TaskStatus,
+    PlannerAgent, ResearcherAgent, CoderAgent, 
+    ReviewerAgent, CoordinatorAgent
+)
+from ai_integration import AIManager, EnhancedAgent
+
+# Database imports
+try:
+    from database import db_manager, RepositoryFactory, get_database_stats
+    from database.models import AgentRole as DB_AgentRole, TaskStatus as DB_TaskStatus, WorkflowStatus as DB_WorkflowStatus
+    DATABASE_AVAILABLE = True
+except ImportError:
+    DATABASE_AVAILABLE = False
+
+
+# Global system state
+agent_system = MultiAgentSystem()
+ai_manager = AIManager()
+active_workflows: Dict[str, Dict[str, Any]] = {}
+websocket_connections: List[WebSocket] = []
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle application startup and shutdown"""
+    # Startup
+    print("StayUpAgents Web Interface starting up...")
+    
+    # Load agents from database if available, otherwise create defaults
+    if DATABASE_AVAILABLE:
+        try:
+            with db_manager.get_session() as session:
+                repo = RepositoryFactory(session)
+                db_agents = repo.agents.get_all_agents()
+                
+                if db_agents:
+                    print(f"Loading {len(db_agents)} agents from database...")
+                    # Agents are loaded by the MultiAgentSystem constructor
+                else:
+                    print("No agents in database, creating default agents...")
+                    # Create default agents
+                    agent_system.add_agent(PlannerAgent("Planner"))
+                    agent_system.add_agent(ResearcherAgent("Researcher"))
+                    agent_system.add_agent(CoderAgent("Coder"))
+                    agent_system.add_agent(ReviewerAgent("Reviewer"))
+        except Exception as e:
+            print(f"Database error during startup: {e}")
+            print("Creating default agents...")
+            agent_system.add_agent(PlannerAgent("Planner"))
+            agent_system.add_agent(ResearcherAgent("Researcher"))
+            agent_system.add_agent(CoderAgent("Coder"))
+            agent_system.add_agent(ReviewerAgent("Reviewer"))
+    else:
+        print("Database not available, creating default agents...")
+        agent_system.add_agent(PlannerAgent("Planner"))
+        agent_system.add_agent(ResearcherAgent("Researcher"))
+        agent_system.add_agent(CoderAgent("Coder"))
+        agent_system.add_agent(ReviewerAgent("Reviewer"))
+    
+    print(f"StayUpAgents Web Interface started with {len(agent_system.agents)} agents!")
+    
+    yield
+    
+    # Shutdown
+    print("StayUpAgents Web Interface shutting down...")
+
+
+# FastAPI app
+app = FastAPI(
+    title="StayUpAgents Web Interface",
+    description="Modern web interface for managing AI agents",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Templates and static files
+template_dir = os.path.join(os.path.dirname(__file__), "templates")
+templates = Jinja2Templates(directory=template_dir)
+# Only mount static files if directory exists
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# Pydantic models
+class WorkflowRequest(BaseModel):
+    description: str
+    use_ai: bool = False
+    ai_provider: Optional[str] = None
+
+
+class AgentConfig(BaseModel):
+    name: str
+    role: str
+    enabled: bool = True
+
+
+class WorkflowStatus(BaseModel):
+    id: str
+    description: str
+    status: str
+    progress: float
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    results: Optional[Dict[str, Any]] = None
+
+
+# WebSocket manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+
+# Routes
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Main dashboard page"""
+    status = agent_system.get_system_status()
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request,
+        "system_status": status,
+        "active_workflows": len(active_workflows),
+        "ai_providers": list(ai_manager.providers.keys())
+    })
+
+
+@app.get("/test", response_class=HTMLResponse)
+@app.get("/test", response_class=HTMLResponse)
+async def test_page(request: Request):
+    """Debug test page"""
+    return templates.TemplateResponse("test.html", {"request": request})
+
+
+@app.get("/debug", response_class=HTMLResponse)
+@app.get("/debug", response_class=HTMLResponse)
+async def debug_page(request: Request):
+    """Raw data debug page"""
+    return templates.TemplateResponse("debug.html", {"request": request})
+
+
+@app.get("/simple", response_class=HTMLResponse)
+@app.get("/simple", response_class=HTMLResponse)
+async def simple_page(request: Request):
+    """Simple debug dashboard"""
+    return templates.TemplateResponse("simple.html", {"request": request})
+
+
+@app.get("/api/status")
+async def get_system_status():
+    """Get current system status"""
+    status = agent_system.get_system_status()
+    status["ai_providers"] = list(ai_manager.providers.keys())
+    status["active_workflows"] = len(active_workflows)
+    return status
+
+
+@app.post("/api/workflow/start")
+async def start_workflow(request: WorkflowRequest):
+    """Start a new workflow"""
+    workflow_id = f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # Create workflow entry
+    active_workflows[workflow_id] = {
+        "id": workflow_id,
+        "description": request.description,
+        "status": "starting",
+        "progress": 0.0,
+        "started_at": datetime.now(),
+        "results": None
+    }
+    
+    # Start workflow in background
+    asyncio.create_task(execute_workflow_background(workflow_id, request))
+    
+    # Notify WebSocket clients
+    await manager.broadcast(json.dumps({
+        "type": "workflow_started",
+        "workflow_id": workflow_id,
+        "description": request.description
+    }))
+    
+    return {"workflow_id": workflow_id, "status": "started"}
+
+
+async def execute_workflow_background(workflow_id: str, request: WorkflowRequest):
+    """Execute workflow in background and update status"""
+    try:
+        # Update status
+        active_workflows[workflow_id]["status"] = "running"
+        active_workflows[workflow_id]["progress"] = 10.0
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "workflow_status_update",
+            "workflow_id": workflow_id,
+            "status": "running",
+            "progress": 10.0
+        }))
+
+        # Execute workflow
+        if request.use_ai and ai_manager.providers:
+            # Use enhanced agents with AI
+            result = await execute_ai_enhanced_workflow(request.description, request.ai_provider)
+        else:
+            # Use standard workflow
+            result = await agent_system.execute_workflow(request.description)
+
+        # Update final status
+        active_workflows[workflow_id]["status"] = "completed"
+        active_workflows[workflow_id]["progress"] = 100.0
+        active_workflows[workflow_id]["completed_at"] = datetime.now()
+        active_workflows[workflow_id]["results"] = result.result if hasattr(result, 'result') else result
+
+    except Exception as e:
+        # Handle errors
+        active_workflows[workflow_id]["status"] = "failed"
+        active_workflows[workflow_id]["results"] = {"error": str(e)}
+
+    # Notify WebSocket clients
+    await manager.broadcast(json.dumps({
+        "type": "workflow_completed",
+        "workflow_id": workflow_id,
+        "status": active_workflows[workflow_id]["status"],
+        "results": active_workflows[workflow_id]["results"]
+    }))
+
+
+async def execute_ai_enhanced_workflow(description: str, ai_provider: Optional[str] = None):
+    """Execute workflow with AI-enhanced agents"""
+    enhanced_agents = {}
+    
+    # Create enhanced agents
+    for role_name, agent in agent_system.agents.items():
+        enhanced_agents[role_name] = EnhancedAgent(
+            name=agent.name,
+            role=agent.role.value,
+            ai_manager=ai_manager
+        )
+    
+    # Execute workflow with AI assistance
+    results = {}
+    workflow_steps = [
+        ("planner", "Create a detailed plan for: " + description),
+        ("researcher", "Research and gather information about: " + description),
+        ("coder", "Implement a solution for: " + description),
+        ("reviewer", "Review and evaluate the solution for: " + description)
+    ]
+    
+    for step_role, step_description in workflow_steps:
+        if step_role in enhanced_agents:
+            result = await enhanced_agents[step_role].process_with_ai(step_description)
+            results[step_role] = result
+    
+    return {"ai_enhanced": True, "results": results}
+
+
+@app.get("/api/workflows")
+async def get_workflows():
+    """Get all workflows"""
+    return list(active_workflows.values())
+
+
+@app.get("/api/workflows/{workflow_id}")
+async def get_workflow(workflow_id: str):
+    """Get specific workflow details"""
+    if workflow_id not in active_workflows:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return active_workflows[workflow_id]
+
+
+@app.delete("/api/workflows/{workflow_id}")
+async def delete_workflow(workflow_id: str):
+    """Delete a workflow"""
+    if workflow_id not in active_workflows:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    del active_workflows[workflow_id]
+    return {"message": "Workflow deleted"}
+
+
+@app.get("/api/agents")
+async def get_agents():
+    """Get all agents"""
+    agents = []
+    for name, agent in agent_system.agents.items():
+        agents.append({
+            "name": agent.name,
+            "role": agent.role.value,
+            "completed_tasks": len(agent.completed_tasks)
+        })
+    return agents
+
+
+@app.post("/api/agents")
+async def add_agent(config: AgentConfig):
+    """Add a new agent"""
+    try:
+        role = AgentRole(config.role)
+        
+        # Create agent based on role
+        if role == AgentRole.PLANNER:
+            agent = PlannerAgent(config.name)
+        elif role == AgentRole.RESEARCHER:
+            agent = ResearcherAgent(config.name)
+        elif role == AgentRole.CODER:
+            agent = CoderAgent(config.name)
+        elif role == AgentRole.REVIEWER:
+            agent = ReviewerAgent(config.name)
+        elif role == AgentRole.COORDINATOR:
+            agent = CoordinatorAgent(config.name)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid agent role")
+        
+        agent_system.add_agent(agent)
+        return {"message": f"Agent {config.name} added successfully"}
+    
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid agent role")
+
+
+# Database API endpoints
+@app.get("/api/database/status")
+async def get_database_status():
+    """Get database status and statistics"""
+    if not DATABASE_AVAILABLE:
+        return {"available": False, "message": "Database module not available"}
+
+    try:
+        stats = get_database_stats()
+        return {"available": True, "stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/tasks")
+async def get_database_tasks(status: Optional[str] = None, limit: int = 50):
+    """Get tasks from database"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            if status:
+                db_status = DB_TaskStatus(status)
+                tasks = repo.tasks.get_tasks_by_status(db_status)
+            else:
+                tasks = repo.tasks.get_recent_tasks(limit)
+
+            # Convert to API format
+            task_list = []
+            for task in tasks:
+                task_list.append({
+                    "id": task.id,
+                    "task_id": task.task_id,
+                    "description": task.description,
+                    "status": task.status.value,
+                    "role_required": task.role_required.value,
+                    "created_at": task.created_at.isoformat(),
+                    "started_at": task.started_at.isoformat() if task.started_at else None,
+                    "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                    "result": task.result,
+                    "error_message": task.error_message
+                })
+
+            return {"tasks": task_list, "count": len(task_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/workflows")
+async def get_database_workflows(status: Optional[str] = None, limit: int = 20):
+    """Get workflows from database"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            if status:
+                db_status = DB_WorkflowStatus(status)
+                workflows = repo.workflows.get_workflows_by_status(db_status)
+            else:
+                workflows = repo.workflows.get_recent_workflows(limit)
+
+            # Convert to API format
+            workflow_list = []
+            for workflow in workflows:
+                workflow_list.append({
+                    "id": workflow.id,
+                    "workflow_id": workflow.workflow_id,
+                    "description": workflow.description,
+                    "status": workflow.status.value,
+                    "progress": workflow.progress,
+                    "use_ai": workflow.use_ai,
+                    "ai_provider": workflow.ai_provider,
+                    "created_at": workflow.created_at.isoformat(),
+                    "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+                    "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None,
+                    "result": workflow.result,
+                    "error_message": workflow.error_message
+                })
+
+            return {"workflows": workflow_list, "count": len(workflow_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/agents")
+async def get_database_agents():
+    """Get agents from database"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            agents = repo.agents.get_all_agents()
+
+            # Convert to API format
+            agent_list = []
+            for agent in agents:
+                agent_list.append({
+                    "id": agent.id,
+                    "name": agent.name,
+                    "role": agent.role.value,
+                    "is_active": agent.is_active,
+                    "created_at": agent.created_at.isoformat(),
+                    "updated_at": agent.updated_at.isoformat()
+                })
+
+            return {"agents": agent_list, "count": len(agent_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/messages")
+async def get_database_messages(agent_id: Optional[int] = None, limit: int = 100):
+    """Get messages from database"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            if agent_id:
+                messages = repo.messages.get_messages_for_agent(agent_id, limit)
+            else:
+                messages = repo.messages.get_recent_messages(limit)
+
+            # Convert to API format
+            message_list = []
+            for message in messages:
+                message_list.append({
+                    "id": message.id,
+                    "sender_id": message.sender_id,
+                    "recipient_id": message.recipient_id,
+                    "content": message.content,
+                    "timestamp": message.timestamp.isoformat(),
+                    "message_type": message.message_type,
+                    "task_id": message.task_id,
+                    "workflow_id": message.workflow_id
+                })
+
+            return {"messages": message_list, "count": len(message_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/metrics")
+async def get_database_metrics(hours: int = 24):
+    """Get system metrics from database"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            metrics_summary = repo.metrics.get_metrics_summary(hours)
+
+            return {
+                "metrics_summary": metrics_summary,
+                "time_range_hours": hours
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/templates")
+async def get_templates(category: Optional[str] = None, include_presets: bool = True):
+    """Get workflow templates"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            if category:
+                templates = repo.templates.get_templates_by_category(category)
+            else:
+                templates = repo.templates.get_all_templates(include_presets=include_presets)
+
+            # Convert to API format
+            template_list = []
+            for template in templates:
+                template_list.append({
+                    "id": template.id,
+                    "name": template.name,
+                    "description": template.description,
+                    "category": template.category,
+                    "steps": template.steps,
+                    "parameters": template.parameters,
+                    "is_preset": template.is_preset,
+                    "created_by": template.created_by,
+                    "created_at": template.created_at.isoformat(),
+                    "updated_at": template.updated_at.isoformat(),
+                    "is_active": template.is_active
+                })
+
+            return {"templates": template_list, "count": len(template_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/templates/{template_id}")
+async def get_template(template_id: int):
+    """Get specific template details"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            template = repo.templates.get_template_by_id(template_id)
+
+            if not template:
+                raise HTTPException(status_code=404, detail="Template not found")
+
+            return {
+                "id": template.id,
+                "name": template.name,
+                "description": template.description,
+                "category": template.category,
+                "steps": template.steps,
+                "parameters": template.parameters,
+                "is_preset": template.is_preset,
+                "created_by": template.created_by,
+                "created_at": template.created_at.isoformat(),
+                "updated_at": template.updated_at.isoformat(),
+                "is_active": template.is_active
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/api/database/templates")
+async def create_template(template_data: Dict[str, Any]):
+    """Create a new workflow template"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        # Validate required fields
+        required_fields = ["name", "description", "category", "steps"]
+        for field in required_fields:
+            if field not in template_data:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            # Check if template with this name already exists
+            existing = repo.templates.get_template_by_name(template_data["name"])
+            if existing:
+                raise HTTPException(status_code=409, detail="Template with this name already exists")
+
+            template = repo.templates.create_template(
+                name=template_data["name"],
+                description=template_data["description"],
+                category=template_data["category"],
+                steps=template_data["steps"],
+                parameters=template_data.get("parameters"),
+                is_preset=template_data.get("is_preset", False),
+                created_by=template_data.get("created_by", "user")
+            )
+
+            return {
+                "id": template.id,
+                "name": template.name,
+                "message": "Template created successfully"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.put("/api/database/templates/{template_id}")
+async def update_template(template_id: int, template_data: Dict[str, Any]):
+    """Update a workflow template"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            template = repo.templates.get_template_by_id(template_id)
+
+            if not template:
+                raise HTTPException(status_code=404, detail="Template not found")
+
+            # Prevent updating preset templates
+            if template.is_preset:
+                raise HTTPException(status_code=403, detail="Cannot modify preset templates")
+
+            # Update allowed fields
+            update_fields = ["name", "description", "category", "steps", "parameters"]
+            update_data = {}
+            for field in update_fields:
+                if field in template_data:
+                    update_data[field] = template_data[field]
+
+            updated_template = repo.templates.update_template(template_id, **update_data)
+
+            if not updated_template:
+                raise HTTPException(status_code=500, detail="Failed to update template")
+
+            return {
+                "id": updated_template.id,
+                "name": updated_template.name,
+                "message": "Template updated successfully"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.delete("/api/database/templates/{template_id}")
+async def delete_template(template_id: int):
+    """Delete a workflow template"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            template = repo.templates.get_template_by_id(template_id)
+
+            if not template:
+                raise HTTPException(status_code=404, detail="Template not found")
+
+            # Prevent deleting preset templates
+            if template.is_preset:
+                raise HTTPException(status_code=403, detail="Cannot delete preset templates")
+
+            success = repo.templates.deactivate_template(template_id)
+
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to delete template")
+
+            return {"message": "Template deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/api/database/templates/categories")
+async def get_template_categories():
+    """Get all template categories"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            categories = repo.templates.get_template_categories()
+
+            return {"categories": categories, "count": len(categories)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/api/workflows/from-template/{template_id}")
+async def create_workflow_from_template(template_id: int, parameters: Optional[Dict[str, Any]] = None):
+    """Create a workflow from a template"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            template = repo.templates.get_template_by_id(template_id)
+
+            if not template:
+                raise HTTPException(status_code=404, detail="Template not found")
+
+            if not template.is_active:
+                raise HTTPException(status_code=400, detail="Template is not active")
+
+            # Generate workflow description from template and parameters
+            workflow_description = template.description
+            if parameters:
+                # Substitute parameters in description if needed
+                for key, value in parameters.items():
+                    placeholder = f"{{{key}}}"
+                    if placeholder in workflow_description:
+                        workflow_description = workflow_description.replace(placeholder, str(value))
+
+            # Create workflow
+            workflow_id = f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            workflow = repo.workflows.create_workflow(
+                workflow_id=workflow_id,
+                description=workflow_description,
+                use_ai=False,  # Templates don't specify AI usage by default
+                ai_provider=None
+            )
+
+            # Store template reference
+            workflow.template_id = template.id
+            session.commit()
+
+            # Start workflow execution in background
+            asyncio.create_task(execute_workflow_from_template_background(workflow.id, template, parameters or {}))
+
+            return {
+                "workflow_id": workflow.id,
+                "template_name": template.name,
+                "status": "started",
+                "message": f"Workflow created from template '{template.name}'"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+# Scheduling API endpoints
+@app.get("/api/scheduling/status")
+async def get_scheduling_status():
+    """Get scheduling system status"""
+    if not DATABASE_AVAILABLE:
+        return {"available": False, "message": "Database not available"}
+
+    try:
+        from workflow_queue import get_queue_manager
+        from workflow_scheduler import get_scheduler
+
+        queue_manager = get_queue_manager()
+        scheduler = get_scheduler()
+
+        queue_status = queue_manager.get_queue_status()
+        scheduler_status = scheduler.get_scheduler_status()
+
+        return {
+            "available": True,
+            "queue": queue_status,
+            "scheduler": scheduler_status
+        }
+
+    except ImportError:
+        return {"available": False, "message": "Scheduling modules not available"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
+
+
+@app.get("/api/scheduled-workflows")
+async def get_scheduled_workflows(enabled_only: bool = True):
+    """Get all scheduled workflows"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            scheduled_workflows = repo.scheduled_workflows.get_all_scheduled_workflows(enabled_only=enabled_only)
+
+            # Convert to API format
+            workflow_list = []
+            for sw in scheduled_workflows:
+                workflow_list.append({
+                    "id": sw.id,
+                    "name": sw.name,
+                    "description": sw.description,
+                    "schedule_type": sw.schedule_type,
+                    "cron_expression": sw.cron_expression,
+                    "next_run_time": sw.next_run_time.isoformat(),
+                    "last_run_time": sw.last_run_time.isoformat() if sw.last_run_time else None,
+                    "enabled": sw.enabled,
+                    "priority": sw.priority,
+                    "max_retries": sw.max_retries,
+                    "timeout_minutes": sw.timeout_minutes,
+                    "template_id": sw.template_id,
+                    "parameters": sw.parameters,
+                    "created_by": sw.created_by,
+                    "created_at": sw.created_at.isoformat(),
+                    "updated_at": sw.updated_at.isoformat()
+                })
+
+            return {"scheduled_workflows": workflow_list, "count": len(workflow_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/api/scheduled-workflows")
+async def create_scheduled_workflow(scheduled_data: Dict[str, Any]):
+    """Create a new scheduled workflow"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        # Validate required fields
+        required_fields = ["name", "description", "schedule_type", "next_run_time"]
+        for field in required_fields:
+            if field not in scheduled_data:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+
+        from workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+
+        # Create scheduled workflow
+        scheduled_id = scheduler.schedule_workflow(
+            name=scheduled_data["name"],
+            description=scheduled_data["description"],
+            schedule_type=scheduled_data["schedule_type"],
+            next_run_time=datetime.fromisoformat(scheduled_data["next_run_time"]),
+            template_id=scheduled_data.get("template_id"),
+            parameters=scheduled_data.get("parameters"),
+            cron_expression=scheduled_data.get("cron_expression"),
+            priority=scheduled_data.get("priority", 1),
+            max_retries=scheduled_data.get("max_retries", 3),
+            timeout_minutes=scheduled_data.get("timeout_minutes", 60),
+            created_by=scheduled_data.get("created_by", "user")
+        )
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "scheduled_workflow_created",
+            "scheduled_workflow_id": scheduled_id,
+            "name": scheduled_data["name"]
+        }))
+
+        return {
+            "id": scheduled_id,
+            "message": "Scheduled workflow created successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
+
+
+@app.put("/api/scheduled-workflows/{scheduled_id}")
+async def update_scheduled_workflow(scheduled_id: int, update_data: Dict[str, Any]):
+    """Update a scheduled workflow"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        from workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+
+        # Convert next_run_time if provided
+        if "next_run_time" in update_data:
+            update_data["next_run_time"] = datetime.fromisoformat(update_data["next_run_time"])
+
+        success = scheduler.update_scheduled_workflow(scheduled_id, **update_data)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Scheduled workflow not found")
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "scheduled_workflow_updated",
+            "scheduled_workflow_id": scheduled_id
+        }))
+
+        return {"message": "Scheduled workflow updated successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
+
+
+@app.delete("/api/scheduled-workflows/{scheduled_id}")
+async def delete_scheduled_workflow(scheduled_id: int):
+    """Delete a scheduled workflow"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        from workflow_scheduler import get_scheduler
+        scheduler = get_scheduler()
+
+        success = scheduler.delete_scheduled_workflow(scheduled_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Scheduled workflow not found")
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "scheduled_workflow_deleted",
+            "scheduled_workflow_id": scheduled_id
+        }))
+
+        return {"message": "Scheduled workflow deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
+
+
+@app.get("/api/queue/status")
+async def get_queue_status():
+    """Get workflow queue status"""
+    try:
+        from workflow_queue import get_queue_manager
+        queue_manager = get_queue_manager()
+
+        status = queue_manager.get_queue_status()
+        return status
+
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Queue manager not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Queue error: {str(e)}")
+
+
+@app.get("/api/queue/entries")
+async def get_queue_entries(status: Optional[str] = None, limit: int = 50):
+    """Get workflow queue entries"""
+    if not DATABASE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+
+            if status == "pending":
+                entries = repo.queue.get_pending_queue_entries(limit)
+            elif status == "running":
+                entries = repo.queue.get_running_queue_entries()
+            else:
+                # Get all entries (simplified - in practice you'd want pagination)
+                entries = repo.queue.get_pending_queue_entries(limit * 2) + repo.queue.get_running_queue_entries()
+
+            # Convert to API format
+            entry_list = []
+            for entry in entries[:limit]:  # Apply limit
+                entry_list.append({
+                    "id": entry.id,
+                    "scheduled_workflow_id": entry.scheduled_workflow_id,
+                    "workflow_id": entry.workflow_id,
+                    "description": entry.description,
+                    "use_ai": entry.use_ai,
+                    "ai_provider": entry.ai_provider,
+                    "parameters": entry.parameters,
+                    "priority": entry.priority,
+                    "status": entry.status,
+                    "queued_at": entry.queued_at.isoformat(),
+                    "started_at": entry.started_at.isoformat() if entry.started_at else None,
+                    "completed_at": entry.completed_at.isoformat() if entry.completed_at else None,
+                    "result": entry.result,
+                    "error_message": entry.error_message,
+                    "retry_count": entry.retry_count,
+                    "max_retries": entry.max_retries
+                })
+
+            return {"queue_entries": entry_list, "count": len(entry_list)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/api/queue/manual")
+async def add_manual_workflow_to_queue(queue_data: Dict[str, Any]):
+    """Manually add a workflow to the queue"""
+    try:
+        # Validate required fields
+        required_fields = ["description"]
+        for field in required_fields:
+            if field not in queue_data:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+
+        from workflow_queue import get_queue_manager
+        queue_manager = get_queue_manager()
+
+        workflow_id = queue_manager.add_workflow_to_queue(
+            description=queue_data["description"],
+            use_ai=queue_data.get("use_ai", False),
+            ai_provider=queue_data.get("ai_provider"),
+            parameters=queue_data.get("parameters"),
+            priority=queue_data.get("priority", 1),
+            max_retries=queue_data.get("max_retries", 3)
+        )
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "workflow_queued",
+            "workflow_id": workflow_id,
+            "description": queue_data["description"]
+        }))
+
+        return {
+            "workflow_id": workflow_id,
+            "message": "Workflow added to queue successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Queue error: {str(e)}")
+
+
+@app.delete("/api/queue/{queue_id}")
+async def cancel_queue_entry(queue_id: int):
+    """Cancel a queued workflow"""
+    try:
+        from workflow_queue import get_queue_manager
+        queue_manager = get_queue_manager()
+
+        # For now, we'll just mark as cancelled in database
+        # In a full implementation, you'd also cancel running tasks
+        if not DATABASE_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Database not available")
+
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            success = repo.queue.update_queue_status(queue_id, "cancelled") is not None
+
+            if not success:
+                raise HTTPException(status_code=404, detail="Queue entry not found")
+
+        # Notify WebSocket clients
+        await manager.broadcast(json.dumps({
+            "type": "workflow_cancelled",
+            "queue_id": queue_id
+        }))
+
+        return {"message": "Workflow cancelled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Queue error: {str(e)}")
+
+
+async def execute_workflow_from_template_background(workflow_db_id: int, template, parameters: Dict[str, Any]):
+    """Execute workflow from template in background"""
+    try:
+        # Create workflow description with parameter substitution
+        description = template.description
+        for key, value in parameters.items():
+            placeholder = f"{{{key}}}"
+            if placeholder in description:
+                description = description.replace(placeholder, str(value))
+
+        # Execute the workflow
+        result = await agent_system.execute_workflow(description)
+
+        # Update workflow status in database
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            result_dict = None
+            if result and hasattr(result, 'result') and result.result:
+                result_dict = result.result
+            elif isinstance(result, dict):
+                result_dict = result
+            else:
+                result_dict = {"summary": str(result)}
+
+            repo.workflows.update_workflow_status(workflow_db_id, DB_WorkflowStatus.COMPLETED, result=result_dict)
+
+    except Exception as e:
+        # Update workflow status on failure
+        with db_manager.get_session() as session:
+            repo = RepositoryFactory(session)
+            repo.workflows.update_workflow_status(workflow_db_id, DB_WorkflowStatus.FAILED, error_message=str(e))
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time updates"""
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive
+            data = await websocket.receive_text()
+            # Echo back for testing
+            await manager.send_personal_message(f"Echo: {data}", websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+# Health check
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "agents": len(agent_system.agents),
+        "active_workflows": len(active_workflows)
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
