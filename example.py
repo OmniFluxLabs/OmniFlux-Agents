@@ -23,7 +23,7 @@ def print_response(title, response):
     print(json.dumps(response.json(), indent=2))
 
 
-def main():
+def main(): print("Multi-Agent AI System - Example Usage\n" + "=" * 60 + "\n" + health_check())
     """Demonstrate the multi-agent system."""
     
     print("Multi-Agent AI System - Example Usage")
