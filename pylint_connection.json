@@ -1,0 +1,15 @@
+[
+    {
+        "type": "fatal",
+        "module": "C:\\Users\\Josh.DESKTOP-I5ON5NJ\\Desktop\\Agents\\StayUpAgents\\database\\connection.py",
+        "obj": "",
+        "line": 1,
+        "column": 0,
+        "endLine": null,
+        "endColumn": null,
+        "path": "database\\connection.py",
+        "symbol": "fatal",
+        "message": "No module named database\\connection.py",
+        "message-id": "F0001"
+    }
+]

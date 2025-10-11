@@ -1,0 +1,15 @@
+﻿[
+    {
+        "type": "fatal",
+        "module": "extended_agents.py",
+        "obj": "",
+        "line": 1,
+        "column": 0,
+        "endLine": null,
+        "endColumn": null,
+        "path": "extended_agents.py",
+        "symbol": "fatal",
+        "message": "No module named extended_agents.py",
+        "message-id": "F0001"
+    }
+]
