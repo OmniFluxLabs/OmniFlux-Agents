@@ -30,7 +30,7 @@ def main():
     print("=" * 60)
     
     # 1. Health check
-    response = requests.get(f"{BASE_URL}/")
+    response = requests.get(f"{BASE_URL}/", timeout=5)
     print_response("1. Health Check", response)
     
     # 2. List all agents
